@@ -1,0 +1,121 @@
+name: Bump the cask
+
+# Keeps this cask in step with Toolport's latest published release.
+#
+# It lives here rather than in the app repo on purpose: a workflow in the app
+# repo cannot write to this one without a cross-repo token, while this repo's
+# own GITHUB_TOKEN can. No new secret to manage or rotate.
+#
+# Checksums are computed from the very bytes GitHub serves, so the cask can
+# never claim a digest the download does not have. That was the failure this
+# replaces: the URL interpolates `version`, so bumping the version alone points
+# every download at new artifacts while the old digests stay behind.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # A few times a day. Releases are not frequent enough to poll harder, and
+    # `workflow_dispatch` covers "I just shipped and want it now".
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bump-cask
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out whether there is anything to do
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # /releases/latest excludes drafts and prereleases, so this can only
+          # ever track a release users can actually download.
+          tag="$(gh release view --repo tsouth89/toolport --json tagName --jq .tagName)"
+          latest="${tag#v}"
+          current="$(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/toolport.rb)"
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          if [ "$latest" = "$current" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Cask is already on $current."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Bumping $current -> $latest."
+          fi
+
+      - name: Rewrite the cask against the published artifacts
+        if: steps.check.outputs.changed == 'true'
+        env:
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          base="https://github.com/tsouth89/toolport/releases/download/v$LATEST"
+          for arch in aarch64 x86_64; do
+            url="$base/Toolport_$arch-apple-darwin.dmg"
+            # --fail so a missing asset stops the run instead of hashing an
+            # error page into the cask.
+            curl -fsSL "$url" -o "$arch.dmg"
+            sum="$(sha256sum "$arch.dmg" | cut -d' ' -f1)"
+            echo "$arch $sum"
+            declare "sum_$arch=$sum"
+          done
+
+          python3 - "$LATEST" "$sum_aarch64" "$sum_x86_64" <<'PY'
+          import re, sys
+          version, arm, intel = sys.argv[1:4]
+          p = "Casks/toolport.rb"
+          s = open(p).read()
+
+          s, n = re.subn(r'^  version "[^"]+"$', f'  version "{version}"',
+                         s, count=1, flags=re.M)
+          assert n == 1, "version line not found"
+
+          # Replace each sha256 inside its own on_arm / on_intel block so the two
+          # digests can never be swapped.
+          def swap(block, digest, text):
+              pat = re.compile(r'(on_' + block + r' do\s*\n\s*sha256 ")[0-9a-f]{64}(")')
+              text, k = pat.subn(lambda m: m.group(1) + digest + m.group(2), text, count=1)
+              assert k == 1, f"sha256 not found in on_{block}"
+              return text
+
+          s = swap("arm", arm, s)
+          s = swap("intel", intel, s)
+          open(p, "w").write(s)
+          print(f"cask rewritten for {version}")
+          PY
+
+          rm -f aarch64.dmg x86_64.dmg
+
+      - name: Check it still parses as a cask
+        if: steps.check.outputs.changed == 'true'
+        run: ruby -c Casks/toolport.rb
+
+      - name: Commit
+        if: steps.check.outputs.changed == 'true'
+        env:
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/toolport.rb
+          git commit -m "chore: bump Toolport to $LATEST"
+          git push
+
+      - name: Summary
+        env:
+          LATEST: ${{ steps.check.outputs.latest }}
+          CURRENT: ${{ steps.check.outputs.current }}
+          CHANGED: ${{ steps.check.outputs.changed }}
+        run: |
+          if [ "$CHANGED" = "true" ]; then
+            echo "Bumped \`$CURRENT\` -> \`$LATEST\`, digests taken from the published DMGs." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Already on \`$CURRENT\`; nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          fi
