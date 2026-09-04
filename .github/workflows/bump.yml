@@ -56,7 +56,7 @@ jobs:
         env:
           LATEST: ${{ steps.check.outputs.latest }}
         run: |
-          base="https://github.com/tsouth89/toolport/releases/download/v$LATEST"
+          base="https://github.com/btsouth/toolport/releases/download/v$LATEST"
           for arch in aarch64 x86_64; do
             url="$base/Toolport_$arch-apple-darwin.dmg"
             # --fail so a missing asset stops the run instead of hashing an
