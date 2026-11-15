@@ -27,7 +27,8 @@ cask "toolport" do
   # Homebrew also runs this block when it upgrades or reinstalls the cask, and
   # does not tell the block which. Its call stack does, so an upgrade keeps every
   # client connected and all data in place. A real uninstall restores each
-  # client's config while the gateway still exists, which also stops the
+  # client's config while the gateway still exists, removes Toolport's own
+  # launch-at-login entry (it would point at the removed app), and stops the
   # Toolport daemon unless a client is connected right now; that daemon exits
   # on its own when its last client disconnects, because its binary is gone.
   # Zap does the same through Toolport's "Remove Toolport data", which also
@@ -74,8 +75,8 @@ cask "toolport" do
         EOS
       end
     else
-      ohai "Restoring client configs and stopping the Toolport gateway"
-      result = command.run(gateway, args: ["--disconnect-all"], print_stderr: true)
+      ohai "Restoring client configs, removing launch at login and stopping the Toolport gateway"
+      result = command.run(gateway, args: ["--disconnect-all", "--uninstall"], print_stderr: true)
       unless result.success?
         opoo <<~EOS
           Some client configs could not be restored (exit #{result.exit_status}).
